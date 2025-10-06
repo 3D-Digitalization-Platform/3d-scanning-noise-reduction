@@ -21,6 +21,6 @@ def write_obj(obj_meta_data, obj_data, filename):
 
 
 if __name__ == '__main__':
-    md, od = read_obj('mm.obj')
+    md, od = read_obj('samples/cube.obj')
     print(md, '\n', od)
-    write_obj(md, od, 'mmw.obj')
+    write_obj(md, od, 'writen_cube.obj')
