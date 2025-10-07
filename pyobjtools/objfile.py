@@ -1,7 +1,8 @@
 import os
 
-import csv_utils
-import io_utils
+from . import csv_utils
+from . import geometry_ops
+from . import io_utils
 
 
 class ObjFile:
@@ -19,3 +20,6 @@ class ObjFile:
 
     def write_obj_file(self, write_path):
         io_utils.write_obj(self.meta_data, self.obj_data, write_path)
+
+    def remove_vertices_list_by_ids(self, removed_vertice_ids: list | set):
+        self.obj_data = geometry_ops.remove_vertices_by_vertexId(self.obj_data, removed_vertice_ids)

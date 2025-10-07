@@ -1,7 +1,7 @@
 import csv
 import os
 
-import io_utils
+from . import io_utils
 
 
 def create_object_folder(base_path, object_name):
