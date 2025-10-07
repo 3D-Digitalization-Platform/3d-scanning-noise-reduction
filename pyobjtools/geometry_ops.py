@@ -18,15 +18,16 @@ def remove_vertices_by_vertexId(obj_data: list, removed_vertice_ids: list | set)
                     removed_idx.add(idx)
                     break
 
-    print(map_numbers)
     return apply_remove(obj_data, removed_idx, map_numbers)
 
 
 def apply_swap_dict(vertex: tuple | list, swap_dict: dict):
     tmp = list(vertex)
     for i in range(2, len(tmp)):
-        x = int(tmp[i])
-        tmp[i] = swap_dict[x]
+        splited_nums = tmp[i].split('/')
+        x = int(splited_nums[0])
+        splited_nums[0] = str(swap_dict[x])
+        tmp[i] = '/'.join(splited_nums)
     return tmp
 
 
