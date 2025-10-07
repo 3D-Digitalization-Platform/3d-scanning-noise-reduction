@@ -10,8 +10,8 @@ def create_object_folder(base_path, object_name):
     return folder_path
 
 
-def write_object_to_csv(obj_meta_data, obj_data, filename):
-    path = create_object_folder('../outputs', filename)
+def write_object_to_csv(obj_meta_data, obj_data, filename,base_path='../outputs'):
+    path = create_object_folder(base_path, filename)
 
     with open(os.path.join(path, 'meta.txt'), 'w') as f:
         f.write(obj_meta_data)
