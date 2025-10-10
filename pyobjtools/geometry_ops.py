@@ -23,7 +23,9 @@ def remove_vertices_by_vertexId(obj_data: list, removed_vertice_ids: list | set)
 
 def apply_swap_dict(vertex: tuple | list, swap_dict: dict):
     tmp = list(vertex)
-    for i in range(2, -1 if tmp[-1].startswith('usemtl') else len(tmp)):
+    for i in range(2, len(tmp)):
+        if tmp[i].startswith('usemtl'): break
+
         splited_nums = tmp[i].split('/')
         x = int(splited_nums[0])
         splited_nums[0] = str(swap_dict[x])
