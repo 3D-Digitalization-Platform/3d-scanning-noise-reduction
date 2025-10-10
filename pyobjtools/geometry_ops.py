@@ -12,7 +12,7 @@ def remove_vertices_by_vertexId(obj_data: list, removed_vertice_ids: list | set)
                 mx_vertices_num += 1
                 map_numbers[idx + 1] = mx_vertices_num
         elif obj[1] == 'f':
-            for part in obj[2:]:
+            for part in obj[2:-1 if obj[-1].startswith('usemtl') else len(obj)]:
                 v_id = part.split('/')[0]
                 if int(v_id) in removed_vertice_ids:
                     removed_idx.add(idx)
@@ -23,7 +23,7 @@ def remove_vertices_by_vertexId(obj_data: list, removed_vertice_ids: list | set)
 
 def apply_swap_dict(vertex: tuple | list, swap_dict: dict):
     tmp = list(vertex)
-    for i in range(2, len(tmp)):
+    for i in range(2, -1 if tmp[-1].startswith('usemtl') else len(tmp)):
         splited_nums = tmp[i].split('/')
         x = int(splited_nums[0])
         splited_nums[0] = str(swap_dict[x])
