@@ -60,4 +60,4 @@ def cluster_points(csv_path, eps=0.5, min_samples=5, output_dir=None):
     print(f"Clusters found: {len(set(db.labels_)) - (1 if -1 in db.labels_ else 0)}")
 
 if __name__ == "__main__":
-   cluster_points('../outputs/mug/vertices.csv',output_dir='../outputs/mug/')
+   cluster_points('../outputs/cube2/vertices.csv',eps=1.3,min_samples=3,output_dir='../outputs/cube2/')
