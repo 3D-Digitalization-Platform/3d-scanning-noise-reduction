@@ -1,5 +1,5 @@
-from HdbscanDenoise import HdbscanDenoise
-from RansackDenoise import RansackDenoise
+from . import HdbscanDenoise
+from . import RansackDenoise
 
 
 class ObjNoiseReduction:
