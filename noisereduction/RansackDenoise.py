@@ -1,8 +1,9 @@
+import csv
 import os
 
 import open3d as o3d
 import pandas as pd
-import csv
+
 from pyobjtools import ObjFile
 
 WORK_DIR = './temp/RANSACK'
@@ -52,7 +53,7 @@ class RansackDenoise:
         # Save detected plane points to noise.csv
         os.makedirs(f"{self.working_dir}/noise", exist_ok=True)
         noise_path = f"{self.working_dir}/noise/noise.csv"
-        plane_points.to_csv(noise_path, index = False, header = False)
+        plane_points.to_csv(noise_path, index=False, header=False)
         print(f"✅ Saved detected plane points to {self.working_dir}/noise/noise.csv")
 
         remove_set = {int(line[0]) for line in csv.reader(open(noise_path))}
@@ -62,8 +63,9 @@ class RansackDenoise:
         output_obj = f'{self.working_dir}/{self.file_name}_ransack_noise_reduced.obj'
         self.obj.write_obj_file(output_obj)
         print(f"Noise reduced OBJ saved as: {output_obj}")
+        return output_obj
 
 
 if __name__ == '__main__':
-    tmp = RansackDenoise('./temp/HDBSCAN/texturedMesh/texturedMesh_noise_reduced.obj')
-    tmp.run_ransack()
+    noiseModel = RansackDenoise('./temp/HDBSCAN/texturedMesh/texturedMesh_noise_reduced.obj')
+    print(noiseModel.run_ransack())

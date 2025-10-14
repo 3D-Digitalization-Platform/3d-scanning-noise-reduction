@@ -68,9 +68,9 @@ class HdbscanDenoise:
         self.obj.write_obj_file(output_obj)
         print(f"Noise reduced OBJ saved as: {output_obj}")
 
-        return noise_path
+        return output_obj
 
 
 if __name__ == '__main__':
-    tmp = HdbscanDenoise('./texturedMesh.obj')
-    tmp.run_hdbscan()
+    noiseModel = HdbscanDenoise('./texturedMesh.obj')
+    print(noiseModel.run_hdbscan())
