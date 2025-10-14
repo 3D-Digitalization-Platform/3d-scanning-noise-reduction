@@ -6,7 +6,7 @@ import pandas as pd
 
 from pyobjtools import ObjFile
 
-WORK_DIR = './temp/RANSACK'
+WORK_DIR = './DeNoiseWork/RANSACK'
 
 
 class RansackDenoise:

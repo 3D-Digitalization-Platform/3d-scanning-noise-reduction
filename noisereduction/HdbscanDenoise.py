@@ -4,7 +4,7 @@ import pandas as pd
 import csv
 from pyobjtools import ObjFile
 
-WORK_DIR = './temp/HDBSCAN'
+WORK_DIR = './DeNoiseWork/HDBSCAN'
 
 
 class HdbscanDenoise:
