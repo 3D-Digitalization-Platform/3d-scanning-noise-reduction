@@ -17,22 +17,19 @@ def main(obj_path: str):
     print(f"Your final denoised file has been copied to: {dest_path}")
 
 
-def check_path(obj_path: str):
+if __name__ == '__main__':
+    if len(sys.argv) != 2:
+        print("Usage: python main.py <path_to_obj_file>")
+        sys.exit(1)
+
+    obj_path = sys.argv[1]
+
     if not obj_path.endswith(".obj"):
         print("Must be a .obj file")
-        return False
+        sys.exit(1)
 
     if not os.path.exists(obj_path):
         print(f"Error: File '{obj_path}' does not exist.")
-        return False
+        sys.exit(1)
 
-    return True
-
-
-if __name__ == '__main__':
-    obj_path = './noiseReductionSample/Sample1/3DModel.obj'
-    if obj_path:
-        if check_path(obj_path):
-            main(obj_path)
-        else:
-            sys.exit(1)
+    main(obj_path)
