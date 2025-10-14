@@ -1,9 +1,0 @@
-# 
-# Wavefront OBJ file
-# Created with AliceVision
-# 
-mtllib texturedMesh.mtl
-
-g TexturedMesh
-usemtl TextureAtlas_0
-usemtl TextureAtlas_1
