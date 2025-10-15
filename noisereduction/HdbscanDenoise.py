@@ -1,7 +1,9 @@
+import csv
 import os
+
 import hdbscan
 import pandas as pd
-import csv
+
 from pyobjtools import ObjFile
 
 WORK_DIR = './DeNoiseWork/HDBSCAN'
@@ -26,7 +28,7 @@ class HdbscanDenoise:
         self.vertices_path = os.path.join(self.working_dir, self.file_name + "/vertices.csv")
         print(self.vertices_path)
 
-    def run_hdbscan(self):
+    def run_hdbscan(self, min_cluster_size=20):
         # Load vertex data
         vertices_filename = self.vertices_path
         df = pd.read_csv(vertices_filename, header=None, names=["VertexID", "VertexType", "X", "Y", "Z"])
@@ -35,7 +37,7 @@ class HdbscanDenoise:
         points = df[['X', 'Y', 'Z']].values
 
         # Run HDBSCAN clustering
-        clusterer = hdbscan.HDBSCAN(min_cluster_size=20)
+        clusterer = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size)
         labels = clusterer.fit_predict(points)
         df['Cluster'] = labels
 
