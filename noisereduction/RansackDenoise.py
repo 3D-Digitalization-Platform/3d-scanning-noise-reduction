@@ -425,22 +425,18 @@ class RansackDenoise:
 
         return cleaned_path
 
+    from collections import deque
 
-    def detect_noise_enclosed_shape(self,
+    def detect_noise_enclosed_shape(
+            self,
             bin_size=0.005,
             quantile_cut=0.25,
+            high_quantile=0.9,  # stricter high variance cutoff (was 0.75)
+            min_region_size=5,  # ignore tiny high-variance blobs
             visualize=True):
         """
-        Detects noise by identifying closed high-variance regions in Y
-        (thickness) over the X-Z plane and keeping points inside them.
-
-        Keeps:
-            - Points within high-variance regions (object boundaries)
-            - Points enclosed by those boundaries (interior)
-            - Points above certain Y quantile (e.g. tall columns)
-
-        Removes:
-            - Low-variance regions connected to the outside (noise)
+        Improved version: smooths Y-range map, removes small artifacts,
+        and fills enclosed regions robustly.
         """
 
         # === Load points ===
@@ -453,33 +449,36 @@ class RansackDenoise:
         bin_keys = np.stack((x_bins, z_bins), axis=1)
         unique_bins, inv_idx = np.unique(bin_keys, axis=0, return_inverse=True)
 
-        # === Compute Y range (thickness) for each (X,Z) bin ===
+        # === Compute Y range (thickness) per bin ===
         y_range = np.zeros(len(unique_bins))
         for i in range(len(unique_bins)):
             ys = Y[inv_idx == i]
             y_range[i] = ys.max() - ys.min() if len(ys) > 1 else 0.0
 
-        # === Adaptive thresholds ===
-        range_cutoff = np.quantile(y_range, 0.75)
-        y_cutoff = np.quantile(Y, quantile_cut)
-
-        print(f"Y-range cutoff (Q75): {range_cutoff:.6f}")
-        print(f"Y quantile cutoff (Q{quantile_cut * 100:.0f}): {y_cutoff:.4f}")
-
-        # === Create 2D grid of bins ===
+        # === Build grid ===
         x_min, z_min = unique_bins.min(axis=0)
         x_max, z_max = unique_bins.max(axis=0)
         gx, gz = x_max - x_min + 1, z_max - z_min + 1
-
         grid_y_range = np.zeros((gx, gz))
-        grid_high = np.zeros((gx, gz), dtype=bool)
         for i, (bx, bz) in enumerate(unique_bins):
-            ix, iz = bx - x_min, bz - z_min
-            grid_y_range[ix, iz] = y_range[i]
-            grid_high[ix, iz] = y_range[i] >= range_cutoff
+            grid_y_range[bx - x_min, bz - z_min] = y_range[i]
 
-        # === Fill enclosed regions (8-connectivity flood fill) ===
-        filled_mask = np.zeros_like(grid_high, dtype=bool)
+        # === Smooth Y-range map (3x3 mean filter) ===
+        smoothed = grid_y_range.copy()
+        for i in range(1, gx - 1):
+            for j in range(1, gz - 1):
+                smoothed[i, j] = grid_y_range[i - 1:i + 2, j - 1:j + 2].mean()
+
+        # === Compute thresholds ===
+        range_cutoff = np.quantile(smoothed[smoothed > 0], high_quantile)
+        y_cutoff = np.quantile(Y, quantile_cut)
+        print(f"Y-range cutoff (Q{high_quantile * 100:.0f}): {range_cutoff:.6f}")
+        print(f"Y quantile cutoff (Q{quantile_cut * 100:.0f}): {y_cutoff:.4f}")
+
+        # === Initial high variance mask ===
+        grid_high = smoothed >= range_cutoff
+
+        # === Remove tiny isolated high-variance blobs ===
         visited = np.zeros_like(grid_high, dtype=bool)
         gx_range, gz_range = range(gx), range(gz)
 
@@ -492,6 +491,29 @@ class RansackDenoise:
                     if 0 <= ni < gx and 0 <= nj < gz:
                         yield ni, nj
 
+        clean_high = np.zeros_like(grid_high, dtype=bool)
+        for i in gx_range:
+            for j in gz_range:
+                if grid_high[i, j] and not visited[i, j]:
+                    q = deque([(i, j)])
+                    comp = []
+                    visited[i, j] = True
+                    while q:
+                        ci, cj = q.popleft()
+                        comp.append((ci, cj))
+                        for ni, nj in neighbors8(ci, cj):
+                            if grid_high[ni, nj] and not visited[ni, nj]:
+                                visited[ni, nj] = True
+                                q.append((ni, nj))
+                    if len(comp) >= min_region_size:
+                        for ci, cj in comp:
+                            clean_high[ci, cj] = True
+
+        grid_high = clean_high
+
+        # === Flood-fill enclosed regions (same logic) ===
+        filled_mask = np.zeros_like(grid_high, dtype=bool)
+        visited = np.zeros_like(grid_high, dtype=bool)
         label = 0
         for i in gx_range:
             for j in gz_range:
@@ -510,21 +532,19 @@ class RansackDenoise:
                             if not grid_high[ni, nj] and not visited[ni, nj]:
                                 visited[ni, nj] = True
                                 q.append((ni, nj))
-                    # Fill if enclosed (doesn't touch border)
                     if not touches_border:
                         for ci, cj in component:
                             filled_mask[ci, cj] = True
 
-        # === Final keep mask: high variance OR enclosed ===
+        # === Final keep mask ===
         keep_mask = grid_high | filled_mask
 
-        # === Map bins back to points ===
+        # === Map to points ===
         keep_per_bin = np.zeros(len(unique_bins), dtype=bool)
         for i, (bx, bz) in enumerate(unique_bins):
             ix, iz = bx - x_min, bz - z_min
             keep_per_bin[i] = keep_mask[ix, iz]
 
-        # === Keep points that are: enclosed OR high variance OR tall ===
         is_enclosed_or_high = keep_per_bin[inv_idx]
         is_tall = Y >= y_cutoff
         keep_points = is_enclosed_or_high | is_tall
@@ -535,18 +555,14 @@ class RansackDenoise:
         # === Visualization ===
         if visualize:
             plt.figure(figsize=(8, 6))
-            plt.imshow(grid_y_range.T, origin='lower', cmap='viridis')
-            plt.title("Y-range heatmap (top view)")
+            plt.imshow(smoothed.T, origin='lower', cmap='viridis')
+            plt.title("Smoothed Y-range heatmap (top view)")
             plt.colorbar(label="Y-range (thickness)")
 
-            # overlay high variance (boundary)
             hi = np.argwhere(grid_high)
             plt.scatter(hi[:, 0], hi[:, 1], color='red', s=3, label="High variance (boundary)")
-
-            # overlay filled enclosed regions
             fi = np.argwhere(filled_mask)
-            plt.scatter(fi[:, 0], fi[:, 1], color='white', s=3, label="Enclosed region (kept)")
-
+            plt.scatter(fi[:, 0], fi[:, 1], color='green', s=3, label="Enclosed region (kept)")
             plt.legend()
             plt.xlabel("X bin")
             plt.ylabel("Z bin")
