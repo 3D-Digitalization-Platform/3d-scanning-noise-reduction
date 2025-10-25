@@ -6,7 +6,6 @@ import numpy as np
 import open3d as o3d
 import pandas as pd
 from scipy.signal import find_peaks
-from collections import deque
 
 from pyobjtools import ObjFile
 
@@ -32,41 +31,80 @@ class RansackDenoise:
         print(self.vertices_path)
 
     def run_ransack(self):
-        # Load vertex data
-        vertices_filename = self.vertices_path
+        import numpy as np
+        import pandas as pd
+        import open3d as o3d
+        import os
 
-        df = pd.read_csv(vertices_filename, header=None, names=["VertexID", "VertexType", "X", "Y", "Z"])
+        # Load vertex data
+        df = pd.read_csv(self.vertices_path, header=None, names=["VertexID", "VertexType", "X", "Y", "Z"])
         points = df[["X", "Y", "Z"]].to_numpy()
 
         # Create Open3D point cloud
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(points)
 
-        # Detect plane using RANSAC
-        plane_model, inliers = pcd.segment_plane(distance_threshold=0.01,
-                                                 ransac_n=3,
-                                                 num_iterations=1000)
+        planes = []
+        remaining = pcd
 
-        [a, b, c, d] = plane_model
-        print(f"Detected plane equation: {a:.3f}x + {b:.3f}y + {c:.3f}z + {d:.3f} = 0")
-        print(f"Detected plane points: {len(inliers)} / {len(points)}")
+        # Run RANSAC multiple times to detect multiple planes
+        for _ in range(5):  # You can increase if there are more layers
+            if len(remaining.points) < 100:
+                break
 
-        # Extract plane points (noise points)
-        plane_points = df.iloc[inliers]
+            plane_model, inliers = remaining.segment_plane(
+                distance_threshold=0.01,
+                ransac_n=3,
+                num_iterations=1000
+            )
 
-        # Save detected plane points to noise.csv
+            if len(inliers) < 100:
+                break  # too small, stop
+
+            plane_points = np.asarray(remaining.points)[inliers]
+            mean_y = plane_points[:, 1].mean()
+
+            planes.append({
+                "model": plane_model,
+                "inliers": inliers,
+                "mean_y": mean_y,
+                "points": plane_points
+            })
+
+            # remove current plane to find others
+            remaining = remaining.select_by_index(inliers, invert=True)
+
+        if not planes:
+            print("❌ No planes detected.")
+            return None
+
+        # Find the lowest plane (smallest mean Y)
+        lowest_plane = min(planes, key=lambda p: p["mean_y"])
+        a, b, c, d = lowest_plane["model"]
+        print(f"✅ Lowest plane equation: {a:.3f}x + {b:.3f}y + {c:.3f}z + {d:.3f} = 0")
+        print(f"Plane mean Y: {lowest_plane['mean_y']:.4f}")
+        print(f"Detected plane points: {len(lowest_plane['inliers'])} / {len(points)}")
+
+        # Save detected lowest plane points as noise
+        plane_points_df = pd.DataFrame(lowest_plane["points"], columns=["X", "Y", "Z"])
         os.makedirs(f"{self.working_dir}/noise", exist_ok=True)
         noise_path = f"{self.working_dir}/noise/noise.csv"
-        plane_points.to_csv(noise_path, index=False, header=False)
-        print(f"✅ Saved detected plane points to {self.working_dir}/noise/noise.csv")
+        plane_points_df.to_csv(noise_path, index=False, header=False)
+        print(f"✅ Saved lowest plane points to {noise_path}")
 
-        remove_set = {int(line[0]) for line in csv.reader(open(noise_path))}
+        # Get vertex IDs corresponding to the removed points
+        noise_ids = df[df[["X", "Y", "Z"]].apply(tuple, axis=1).isin(
+            [tuple(p) for p in lowest_plane["points"]]
+        )]["VertexID"]
 
+        remove_set = set(noise_ids.astype(int))
         self.obj.remove_vertices_list_by_ids(remove_set)
 
-        output_obj = f'{self.working_dir}/{self.file_name}_ransack_noise_reduced.obj'
+        # Write output OBJ
+        output_obj = f'{self.working_dir}/{self.file_name}_ransack_lowest_plate_removed.obj'
         self.obj.write_obj_file(output_obj)
-        print(f"Noise reduced OBJ saved as: {output_obj}")
+        print(f"✅ Noise reduced OBJ saved as: {output_obj}")
+
         return output_obj
 
     def run_cuboid_detection(self, margin=0.02):
@@ -425,62 +463,86 @@ class RansackDenoise:
 
         return cleaned_path
 
-    from collections import deque
-
     def detect_noise_enclosed_shape(
             self,
             bin_size=0.005,
             quantile_cut=0.25,
-            high_quantile=0.9,  # stricter high variance cutoff (was 0.75)
-            min_region_size=5,  # ignore tiny high-variance blobs
+            high_quantile=0.9,  # stricter high variance cutoff
+            min_region_size=5,  # ignore tiny high-variance blobs (in grid cells)
             visualize=True):
         """
-        Improved version: smooths Y-range map, removes small artifacts,
-        and fills enclosed regions robustly.
+        Detect enclosed high-variance regions in X-Z (top view), keep only those
+        regions (boundary + enclosed interior), export noise points and remove them
+        from the OBJ.
+
+        IMPORTANT: This function assumes the CSV read by `self.vertices_path`
+        includes a VertexID column that matches the vertex IDs expected by your
+        `self.obj.remove_vertices_list_by_ids()` method.
         """
+
+        import numpy as np
+        import pandas as pd
+        import matplotlib.pyplot as plt
+        from collections import deque
 
         # === Load points ===
         df = pd.read_csv(self.vertices_path, header=None, names=["VertexID", "VertexType", "X", "Y", "Z"])
-        X, Y, Z = df["X"].to_numpy(), df["Y"].to_numpy(), df["Z"].to_numpy()
+        X = df["X"].to_numpy()
+        Y = df["Y"].to_numpy()
+        Z = df["Z"].to_numpy()
 
-        # === Bin X/Z ===
+        # === Bin X/Z into integer grid coordinates ===
         x_bins = np.floor(X / bin_size).astype(int)
         z_bins = np.floor(Z / bin_size).astype(int)
         bin_keys = np.stack((x_bins, z_bins), axis=1)
         unique_bins, inv_idx = np.unique(bin_keys, axis=0, return_inverse=True)
 
-        # === Compute Y range (thickness) per bin ===
-        y_range = np.zeros(len(unique_bins))
-        for i in range(len(unique_bins)):
+        # === Y-range (thickness) per unique (x,z) bin ===
+        n_bins = len(unique_bins)
+        y_range = np.zeros(n_bins, dtype=float)
+        for i in range(n_bins):
             ys = Y[inv_idx == i]
-            y_range[i] = ys.max() - ys.min() if len(ys) > 1 else 0.0
+            if len(ys) > 1:
+                y_range[i] = ys.max() - ys.min()
+            else:
+                y_range[i] = 0.0
 
-        # === Build grid ===
+        # === Build dense grid covering all occupied bins ===
         x_min, z_min = unique_bins.min(axis=0)
         x_max, z_max = unique_bins.max(axis=0)
-        gx, gz = x_max - x_min + 1, z_max - z_min + 1
-        grid_y_range = np.zeros((gx, gz))
-        for i, (bx, bz) in enumerate(unique_bins):
-            grid_y_range[bx - x_min, bz - z_min] = y_range[i]
+        gx = x_max - x_min + 1
+        gz = z_max - z_min + 1
+        grid_y_range = np.zeros((gx, gz), dtype=float)
 
-        # === Smooth Y-range map (3x3 mean filter) ===
+        # Fill grid with y_range values (0 where no points)
+        for idx, (bx, bz) in enumerate(unique_bins):
+            ix, iz = bx - x_min, bz - z_min
+            grid_y_range[ix, iz] = y_range[idx]
+
+        # === Smooth Y-range map (3x3 mean) to reduce spiky noise ===
         smoothed = grid_y_range.copy()
+        # Only iterate internal cells to avoid boundary index checks
         for i in range(1, gx - 1):
             for j in range(1, gz - 1):
                 smoothed[i, j] = grid_y_range[i - 1:i + 2, j - 1:j + 2].mean()
 
-        # === Compute thresholds ===
-        range_cutoff = np.quantile(smoothed[smoothed > 0], high_quantile)
-        y_cutoff = np.quantile(Y, quantile_cut)
+        # === Thresholds ===
+        nonzero_vals = smoothed[smoothed > 0]
+        if nonzero_vals.size == 0:
+            print("No occupied bins found. Nothing to remove.")
+            return None
+
+        range_cutoff = np.quantile(nonzero_vals, high_quantile)
+        y_cutoff = np.quantile(Y, quantile_cut)  # kept for info but not used for keeping points
         print(f"Y-range cutoff (Q{high_quantile * 100:.0f}): {range_cutoff:.6f}")
         print(f"Y quantile cutoff (Q{quantile_cut * 100:.0f}): {y_cutoff:.4f}")
 
-        # === Initial high variance mask ===
+        # === Initial high-variance mask (candidate boundary) ===
         grid_high = smoothed >= range_cutoff
 
-        # === Remove tiny isolated high-variance blobs ===
+        # === Remove tiny isolated high-variance blobs (morphological cleaning) ===
         visited = np.zeros_like(grid_high, dtype=bool)
-        gx_range, gz_range = range(gx), range(gz)
+        clean_high = np.zeros_like(grid_high, dtype=bool)
 
         def neighbors8(i, j):
             for di in (-1, 0, 1):
@@ -491,13 +553,12 @@ class RansackDenoise:
                     if 0 <= ni < gx and 0 <= nj < gz:
                         yield ni, nj
 
-        clean_high = np.zeros_like(grid_high, dtype=bool)
-        for i in gx_range:
-            for j in gz_range:
+        for i in range(gx):
+            for j in range(gz):
                 if grid_high[i, j] and not visited[i, j]:
                     q = deque([(i, j)])
-                    comp = []
                     visited[i, j] = True
+                    comp = []
                     while q:
                         ci, cj = q.popleft()
                         comp.append((ci, cj))
@@ -506,70 +567,202 @@ class RansackDenoise:
                                 visited[ni, nj] = True
                                 q.append((ni, nj))
                     if len(comp) >= min_region_size:
-                        for ci, cj in comp:
+                        for (ci, cj) in comp:
                             clean_high[ci, cj] = True
 
         grid_high = clean_high
 
-        # === Flood-fill enclosed regions (same logic) ===
+        # === Flood-fill connected low-variance components and mark enclosed ones ===
         filled_mask = np.zeros_like(grid_high, dtype=bool)
         visited = np.zeros_like(grid_high, dtype=bool)
-        label = 0
-        for i in gx_range:
-            for j in gz_range:
+
+        for i in range(gx):
+            for j in range(gz):
                 if not grid_high[i, j] and not visited[i, j]:
-                    label += 1
                     q = deque([(i, j)])
                     visited[i, j] = True
-                    component = []
+                    comp = []
                     touches_border = False
                     while q:
                         ci, cj = q.popleft()
-                        component.append((ci, cj))
+                        comp.append((ci, cj))
                         if ci == 0 or ci == gx - 1 or cj == 0 or cj == gz - 1:
                             touches_border = True
                         for ni, nj in neighbors8(ci, cj):
                             if not grid_high[ni, nj] and not visited[ni, nj]:
                                 visited[ni, nj] = True
                                 q.append((ni, nj))
+                    # If component does NOT touch grid border, it is enclosed -> keep it
                     if not touches_border:
-                        for ci, cj in component:
+                        for (ci, cj) in comp:
                             filled_mask[ci, cj] = True
 
-        # === Final keep mask ===
+        # === Final keep mask at grid level: keep boundary OR enclosed interior ===
         keep_mask = grid_high | filled_mask
 
-        # === Map to points ===
-        keep_per_bin = np.zeros(len(unique_bins), dtype=bool)
-        for i, (bx, bz) in enumerate(unique_bins):
+        # === Map keep mask back to each unique bin, then to each point ===
+        keep_per_unique_bin = np.zeros(n_bins, dtype=bool)
+        for idx, (bx, bz) in enumerate(unique_bins):
             ix, iz = bx - x_min, bz - z_min
-            keep_per_bin[i] = keep_mask[ix, iz]
+            keep_per_unique_bin[idx] = keep_mask[ix, iz]
 
-        is_enclosed_or_high = keep_per_bin[inv_idx]
-        is_tall = Y >= y_cutoff
-        keep_points = is_enclosed_or_high | is_tall
+        # Boolean mask for each point
+        is_enclosed_or_high = keep_per_unique_bin[inv_idx]
+        keep_points = is_enclosed_or_high  # <<--- CRITICAL: only keep these
         noise_points = ~keep_points
 
-        print(f"Detected {noise_points.sum()} noise points and {keep_points.sum()} object points")
+        # Logging counts
+        n_noise = int(noise_points.sum())
+        n_keep = int(keep_points.sum())
+        print(f"Detected {n_noise} noise points and {n_keep} kept (object) points")
 
-        # === Visualization ===
+        # === Visualization (top-view heatmap + overlays) ===
         if visualize:
-            plt.figure(figsize=(8, 6))
+            plt.figure(figsize=(9, 6))
             plt.imshow(smoothed.T, origin='lower', cmap='viridis')
             plt.title("Smoothed Y-range heatmap (top view)")
             plt.colorbar(label="Y-range (thickness)")
 
             hi = np.argwhere(grid_high)
-            plt.scatter(hi[:, 0], hi[:, 1], color='red', s=3, label="High variance (boundary)")
+            if hi.size:
+                plt.scatter(hi[:, 0], hi[:, 1], color='red', s=3, label="High variance (boundary)")
+
             fi = np.argwhere(filled_mask)
-            plt.scatter(fi[:, 0], fi[:, 1], color='green', s=3, label="Enclosed region (kept)")
-            plt.legend()
+            if fi.size:
+                plt.scatter(fi[:, 0], fi[:, 1], color='blue', s=3, label="Enclosed region (kept)")
+
+            # Optionally show which unique bins are actually occupied (light gray)
+            occ = np.argwhere(grid_y_range > 0)
+            if occ.size:
+                plt.scatter(occ[:, 0], occ[:, 1], color='lightgray', s=1, alpha=0.6, label="Occupied bins")
+
+            plt.legend(loc='upper right')
             plt.xlabel("X bin")
             plt.ylabel("Z bin")
             plt.tight_layout()
             plt.show()
 
-        return keep_points
+        # === Export noise points (use VertexID reliably) ===
+        # Select original columns and rows for noise points
+        noise_df = df.loc[noise_points, ["VertexID", "VertexType", "X", "Y", "Z"]].copy()
+
+        # Make sure VertexID is integer-like before removing
+        try:
+            noise_df["VertexID"] = noise_df["VertexID"].astype(int)
+        except Exception:
+            # If conversion fails, fall back to using DataFrame index (but prefer VertexID)
+            noise_df["VertexID"] = noise_df.index.astype(int)
+            print("Warning: VertexID column not integer-convertible; using DataFrame index for removal.")
+
+        noise_path = f"{self.working_dir}/noise_points.csv"
+        noise_df.to_csv(noise_path, index=False, header=False)
+        print(f"Saved noise points to {noise_path} (rows: {len(noise_df)})")
+
+        # Remove by VertexID values (as integers)
+        remove_set = set(noise_df["VertexID"].tolist())
+        # Call your OBJ removal function
+        self.obj.remove_vertices_list_by_ids(remove_set)
+
+        # Write cleaned OBJ file and return path
+        cleaned_path = f"{self.working_dir}/{self.file_name}_noise_enclosed.obj"
+        self.obj.write_obj_file(cleaned_path)
+        print(f"Wrote cleaned OBJ to: {cleaned_path}")
+
+        return cleaned_path
+
+
+    def detect_noise_by_ransac_plane(self,
+                                     max_iters=1500,
+                                     distance_thresh=0.003,  # distance from plane to consider inlier
+                                     min_inlier_frac=0.02,  # require at least this fraction of points to accept plane
+                                     sample_region_frac=0.25  # sample only lowest fraction of points to focus on plate
+                                     ):
+        import csv, random
+        import numpy as np
+        import pandas as pd
+        import matplotlib.pyplot as plt
+
+        # load
+        df = pd.read_csv(self.vertices_path, header=None, names=["VertexID", "VertexType", "X", "Y", "Z"])
+        points = df[['VertexID', 'VertexType', 'X', 'Y', 'Z']].to_numpy()
+        X = points[:, 2];
+        Y = points[:, 3];
+        Z = points[:, 4]
+
+        # focus sampling on lowest part of cloud (likely contains plate)
+        y_cut = np.quantile(Y, sample_region_frac)
+        sample_mask = Y <= y_cut
+        sample_idx = np.where(sample_mask)[0]
+        if len(sample_idx) < 3:
+            sample_idx = np.arange(len(points))
+
+        best_plane = None
+        best_inliers = None
+        best_count = 0
+
+        pts_xyz = np.stack([X, Y, Z], axis=1)
+
+        for it in range(max_iters):
+            # random 3 points (avoid collinearity)
+            ids = np.random.choice(sample_idx, size=3, replace=False)
+            p0, p1, p2 = pts_xyz[ids]
+            v1 = p1 - p0
+            v2 = p2 - p0
+            n = np.cross(v1, v2)
+            n_norm = np.linalg.norm(n)
+            if n_norm < 1e-9:
+                continue
+            n = n / n_norm
+            d = -np.dot(n, p0)
+            # distances of all points to plane
+            dist = np.abs(np.dot(pts_xyz, n) + d)
+            inliers = np.where(dist <= distance_thresh)[0]
+            cnt = len(inliers)
+            if cnt > best_count:
+                best_count = cnt
+                best_inliers = inliers
+                best_plane = (n.copy(), float(d))
+
+        if best_inliers is None or best_count < max(3, int(min_inlier_frac * len(points))):
+            print("RANSAC failed to find a dominant plane — no removal performed.")
+            return None
+
+        # choose plate inliers that are at the bottom (low Y)
+        plate_inliers = best_inliers[Y[best_inliers] <= np.quantile(Y[best_inliers], 0.9)]
+
+        print(f"RANSAC plane found with {len(best_inliers)} inliers; candidate plate inliers: {len(plate_inliers)}")
+
+        # classify noise = plate_inliers (below plane within threshold and low Y)
+        noise_mask = np.zeros(len(points), dtype=bool)
+        noise_mask[plate_inliers] = True
+
+        noise_points = points[noise_mask]
+        object_points = points[~noise_mask]
+
+        # save noise csv
+        noise_path = f"{self.working_dir}/noise_points.csv"
+        pd.DataFrame(noise_points, columns=["VertexID", "VertexType", "X", "Y", "Z"]).to_csv(noise_path, index=False,
+                                                                                             header=False)
+        print("Saved:", noise_path)
+
+        # remove from OBJ
+        remove_set = {int(line[0]) for line in csv.reader(open(noise_path))}
+        self.obj.remove_vertices_list_by_ids(remove_set)
+        cleaned_path = f"{self.working_dir}/{self.file_name}_noise_ransac.obj"
+        self.obj.write_obj_file(cleaned_path)
+
+        # visualization
+        fig = plt.figure(figsize=(9, 6))
+        ax = fig.add_subplot(111)
+        ax.scatter(points[:, 2], points[:, 3], s=3, c='lightgray', label='all (X vs Y)')
+        ax.scatter(noise_points[:, 2], noise_points[:, 3], s=6, c='red', label='noise (plate)')
+        ax.set_xlabel('X');
+        ax.set_ylabel('Y');
+        ax.legend();
+        plt.title('RANSAC plate detection (X vs Y)')
+        plt.show()
+
+        return cleaned_path
 
 
 if __name__ == '__main__':
