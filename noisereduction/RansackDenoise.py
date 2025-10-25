@@ -670,14 +670,13 @@ class RansackDenoise:
 
         return cleaned_path
 
-
     def detect_noise_by_ransac_plane(self,
                                      max_iters=1500,
                                      distance_thresh=0.003,  # distance from plane to consider inlier
                                      min_inlier_frac=0.02,  # require at least this fraction of points to accept plane
                                      sample_region_frac=0.25  # sample only lowest fraction of points to focus on plate
                                      ):
-        import csv, random
+        import csv
         import numpy as np
         import pandas as pd
         import matplotlib.pyplot as plt
@@ -761,6 +760,187 @@ class RansackDenoise:
         ax.legend();
         plt.title('RANSAC plate detection (X vs Y)')
         plt.show()
+
+        return cleaned_path
+
+    def detect_noise_by_hole(
+            self,
+            ransac_max_iters=1500,
+            ransac_dist_thresh=0.003,
+            ransac_min_inlier_frac=0.02,
+            thickness_margin=0.09,
+            horiz_radius=0.007,  # horizontal neighborhood radius (meters)
+            vert_delta=0.001,  # minimum vertical offset to consider "above"
+            visualize=True):
+        """
+        Detect and clean plate points using RANSAC plane detection with thickness consideration.
+
+        Steps:
+          1. Detect a dominant plate-like plane using RANSAC.
+          2. Expand the plate region by a given thickness margin.
+          3. Identify which plate points to 'keep' if there's an object above them.
+          4. The remaining plate points are treated as unwanted (noise).
+          5. Save unwanted points to CSV and remove them from the OBJ file.
+          6. Return the path of the cleaned (exported) OBJ file.
+
+        Visualization (optional):
+          - All points (gray)
+          - Plate region (red)
+          - Kept plate points (green)
+        """
+        import numpy as np
+        import pandas as pd
+        import matplotlib.pyplot as plt
+        import csv
+        from collections import defaultdict
+
+        # === Load points ===
+        df = pd.read_csv(self.vertices_path, header=None, names=["VertexID", "VertexType", "X", "Y", "Z"])
+        pts_arr = df[['VertexID', 'VertexType', 'X', 'Y', 'Z']].to_numpy()
+        X = pts_arr[:, 2].astype(float)
+        Y = pts_arr[:, 3].astype(float)
+        Z = pts_arr[:, 4].astype(float)
+        pts_xyz = np.stack([X, Y, Z], axis=1)
+        n_points = len(pts_xyz)
+        if n_points < 3:
+            print("Not enough points.")
+            return None
+
+        # === RANSAC plane detection (dominant plane) ===
+        best_plane = None
+        best_inliers = None
+        best_count = 0
+        for _ in range(ransac_max_iters):
+            ids = np.random.choice(n_points, size=3, replace=False)
+            p0, p1, p2 = pts_xyz[ids]
+            v1, v2 = p1 - p0, p2 - p0
+            n = np.cross(v1, v2)
+            n_norm = np.linalg.norm(n)
+            if n_norm < 1e-9:
+                continue
+            n /= n_norm
+            d = -np.dot(n, p0)
+            dist = np.abs(np.dot(pts_xyz, n) + d)
+            inliers = np.where(dist <= ransac_dist_thresh)[0]
+            cnt = len(inliers)
+            if cnt > best_count:
+                best_count = cnt
+                best_inliers = inliers
+                best_plane = (n.copy(), float(d))
+
+        if best_inliers is None or best_count < max(3, int(ransac_min_inlier_frac * n_points)):
+            print("RANSAC failed to find a dominant plane.")
+            return None
+
+        # === Expand plate by thickness margin ===
+        n_vec, d_val = best_plane
+        signed_dist = np.dot(pts_xyz, n_vec) + d_val
+        thick_mask = np.abs(signed_dist) <= (thickness_margin / 2.0)
+        plate_idx = np.where(thick_mask)[0]
+        non_plate_idx = np.where(~thick_mask)[0]
+
+        if plate_idx.size == 0:
+            print("No plate points after applying thickness.")
+            return None
+        if non_plate_idx.size == 0:
+            print("No non-plate points found; nothing above plate to trigger 'kept' labels.")
+            if visualize:
+                plt.figure(figsize=(8, 8))
+                plt.scatter(X, Z, s=2, c='lightgray', label='All points')
+                plt.scatter(X[plate_idx], Z[plate_idx], s=3, c='red', label='Plate (thick)')
+                plt.axis('equal')
+                plt.legend()
+                plt.show()
+            return None
+
+        # === Neighbor search ===
+        xz_nonplate = np.stack([X[non_plate_idx], Z[non_plate_idx]], axis=1)
+        try:
+            from scipy.spatial import cKDTree as KDTree
+            tree = KDTree(xz_nonplate)
+            use_tree = True
+        except Exception:
+            use_tree = False
+            grid_size = horiz_radius
+            grid = defaultdict(list)
+            for i, (x0, z0) in enumerate(xz_nonplate):
+                gx = int(np.floor(x0 / grid_size))
+                gz = int(np.floor(z0 / grid_size))
+                grid[(gx, gz)].append(i)
+
+        # === Determine which plate points to keep ===
+        plate_xz = np.stack([X[plate_idx], Z[plate_idx]], axis=1)
+        plate_y = Y[plate_idx]
+        kept_mask_plate = np.zeros(len(plate_idx), dtype=bool)
+
+        if use_tree:
+            neighbors_list = tree.query_ball_point(plate_xz, r=horiz_radius)
+            for i_plate, neigh_inds in enumerate(neighbors_list):
+                if not neigh_inds:
+                    continue
+                neigh_orig_idx = non_plate_idx[neigh_inds]
+                neigh_y = Y[neigh_orig_idx]
+                if np.any(neigh_y >= plate_y[i_plate] + vert_delta):
+                    kept_mask_plate[i_plate] = True
+        else:
+            for i_plate, (x0, z0) in enumerate(plate_xz):
+                gx = int(np.floor(x0 / grid_size))
+                gz = int(np.floor(z0 / grid_size))
+                found = False
+                for dx in (-1, 0, 1):
+                    for dz in (-1, 0, 1):
+                        cell = (gx + dx, gz + dz)
+                        if cell not in grid:
+                            continue
+                        for idx_in_cell in grid[cell]:
+                            orig_idx = non_plate_idx[idx_in_cell]
+                            dxv = X[orig_idx] - x0
+                            dzv = Z[orig_idx] - z0
+                            if dxv * dxv + dzv * dzv <= horiz_radius * horiz_radius:
+                                if Y[orig_idx] >= plate_y[i_plate] + vert_delta:
+                                    kept_mask_plate[i_plate] = True
+                                    found = True
+                                    break
+                        if found:
+                            break
+                    if found:
+                        break
+
+        kept_plate_global_idx = plate_idx[kept_mask_plate]
+        noise_plate_global_idx = plate_idx[~kept_mask_plate]
+
+        print(
+            f"Plate points total: {plate_idx.size}; kept: {kept_plate_global_idx.size}; noise: {noise_plate_global_idx.size}")
+
+        # === Visualization ===
+        if visualize:
+            plt.figure(figsize=(9, 9))
+            plt.scatter(X, Z, s=2, c='lightgray', label='All points')
+            plt.scatter(X[plate_idx], Z[plate_idx], s=3, c='red', label='Plate (thick)')
+            if kept_plate_global_idx.size:
+                plt.scatter(X[kept_plate_global_idx], Z[kept_plate_global_idx], s=6, c='green',
+                            label='Kept plate points')
+            plt.xlabel('X')
+            plt.ylabel('Z')
+            plt.title('Top-down (X-Z): plate (red), kept (green)')
+            plt.legend()
+            plt.axis('equal')
+            plt.show()
+
+        # === Save noise points and remove them from OBJ ===
+        noise_points = df.iloc[noise_plate_global_idx].to_numpy()
+        noise_path = f"{self.working_dir}/noise_points.csv"
+        pd.DataFrame(noise_points, columns=["VertexID", "VertexType", "X", "Y", "Z"]).to_csv(noise_path, index=False,
+                                                                                             header=False)
+        print("Saved:", noise_path)
+
+        # Remove noise vertices from OBJ file
+        remove_set = {int(line[0]) for line in csv.reader(open(noise_path))}
+        self.obj.remove_vertices_list_by_ids(remove_set)
+        cleaned_path = f"{self.working_dir}/{self.file_name}_noise_ransac.obj"
+        self.obj.write_obj_file(cleaned_path)
+
+        print("Cleaned OBJ saved:", cleaned_path)
 
         return cleaned_path
 
