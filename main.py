@@ -1,7 +1,7 @@
 import os
-import shutil
 import sys
 
+from noisereduction.AlphaShapeDenoise import AlphaShapeDenoise
 from noisereduction.HdbscanDenoise import HdbscanDenoise
 from noisereduction.RansackDenoise import RansackDenoise
 
@@ -14,14 +14,10 @@ def main(obj_path: str):
 
     final_res = HdbscanDenoise(hole_noise_removed).run_hdbscan()
 
-    print(f'your final denoised file in {final_res}')
-    output_dir = os.path.dirname(obj_path)
-    dest_path = os.path.join(output_dir, os.path.basename(final_res))
-    shutil.copy(final_res, dest_path)
-    print(f"Your final denoised file has been copied to: {dest_path}")
-
-    os.startfile(dest_path)
-
+def test_alphaShapeDenoise(obj_path: str):
+    hddbscan_1 = HdbscanDenoise(obj_path).run_hdbscan()
+    final_obj = AlphaShapeDenoise(hddbscan_1).alpha_shape_filter_auto()
+    os.startfile(final_obj)
 
 def check_path(obj_path: str):
     if not obj_path.endswith(".obj"):
@@ -37,9 +33,9 @@ def check_path(obj_path: str):
 
 obj_list = [
     './noiseReductionSample/Sample1/3DModel.obj',
-    './noiseReductionSample/Sample2/3DModel.obj',
+    # './noiseReductionSample/Sample2/3DModel.obj',
     # './noiseReductionSample/Sample3/supermug.obj',
-    './noiseReductionSample/Sample4/ultramug.obj'
+    # './noiseReductionSample/Sample4/ultramug.obj'
 ]
 
 if __name__ == '__main__':
